@@ -1,0 +1,153 @@
+name: Deploy Angular to GitHub Pages with Testing and Coverage
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+environment:
+  name: github-pages
+  url: ${{ steps.deployment.outputs.page_url }}
+
+jobs:
+  test-lint-build-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📁 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: 📦 Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: 🔧 Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run Jest tests with coverage
+        id: test-coverage
+        run: |
+          echo "Running Jest tests with coverage validation..."
+          npm run test:ci
+          
+          # Check if coverage summary file exists
+          if [ ! -f coverage/coverage-summary.json ]; then
+            echo "❌ Coverage summary not found"
+            exit 1
+          fi
+          
+          # Extract coverage percentage
+          COVERAGE=$(node -p "
+            const coverage = require('./coverage/coverage-summary.json');
+            const total = coverage.total;
+            Math.round(total.statements.pct);
+          ")
+          
+          echo "📊 Total coverage: ${COVERAGE}%"
+          
+          # Check if coverage is at least 80%
+          if [ $COVERAGE -lt 80 ]; then
+            echo "❌ Deployment stopped: Code coverage below 80% (Actual: ${COVERAGE}%)"
+            exit 1
+          fi
+          
+          echo "✅ Coverage validation passed: ${COVERAGE}% ≥ 80%"
+          echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
+
+      - name: 🧹 Run ESLint validation
+        id: eslint-check
+        run: |
+          echo "Running ESLint validation..."
+          if npm run lint:check; then
+            echo "✅ ESLint validation passed - no rule violations found"
+            echo "eslint_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Deployment stopped: ESLint validation failed"
+            echo "eslint_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 🏗️ Build Angular project
+        id: build
+        run: |
+          echo "Building Angular project..."
+          npm run build -- --base-href '/EsLint3/'
+          echo "build_status=success" >> $GITHUB_OUTPUT
+
+      - name: 🔗 Copy index.html to 404.html for SPA routing
+        run: |
+          cp dist/es-lint3/index.html dist/es-lint3/404.html
+          echo "✅ SPA routing fix applied"
+
+      - name: ⚙️ Configure GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: 📤 Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'dist/es-lint3'
+
+      - name: 🚀 Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: test-lint-build-deploy
+    if: always()
+    
+    steps:
+      - name: 📢 Deployment Status Notification
+        run: |
+          if [ "${{ needs.test-lint-build-deploy.result }}" == "success" ]; then
+            echo "✅ Deployment succeeded! 🎉"
+            echo "🌐 Check your site at: https://AishwaryaKulkarni1801.github.io/EsLint3/"
+            echo ""
+            echo "📊 Build Summary:"
+            echo "- Jest Coverage: ${{ needs.test-lint-build-deploy.outputs.coverage }}%"
+            echo "- ESLint Status: ✅ Passed"
+            echo "- Build Status: ✅ Success"
+            echo "- Deployment: ✅ Complete"
+          else
+            echo "❌ Deployment failed"
+            echo ""
+            echo "🔍 Failure Analysis:"
+            
+            # Check which step failed
+            if [ "${{ needs.test-lint-build-deploy.outputs.coverage }}" == "" ]; then
+              echo "- Reason: Test suite failed or coverage below 80%"
+            elif [ "${{ needs.test-lint-build-deploy.outputs.eslint_status }}" == "failed" ]; then
+              echo "- Reason: ESLint validation failed"
+            elif [ "${{ needs.test-lint-build-deploy.outputs.build_status }}" == "" ]; then
+              echo "- Reason: Build process failed"
+            else
+              echo "- Reason: Deployment step failed"
+            fi
+            
+            echo ""
+            echo "💡 Next Steps:"
+            echo "1. Check the workflow logs above for detailed error messages"
+            echo "2. Fix the identified issues in your code"
+            echo "3. Push your changes to trigger a new deployment"
+          fi
